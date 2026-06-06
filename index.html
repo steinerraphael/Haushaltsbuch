@@ -1,0 +1,440 @@
+<!DOCTYPE html>
+<html lang="de">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Hausstand · Finanzen & Verträge</title>
+
+  <!-- React + Babel (CDN) -->
+  <script crossorigin src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+  <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+  <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+  <!-- Supabase SDK -->
+  <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,400;9..144,500;9..144,600&family=Spline+Sans+Mono:wght@400;500&family=Outfit:wght@300;400;500;600&display=swap" rel="stylesheet">
+
+  <style>
+    * { box-sizing: border-box; margin: 0; }
+    body { background: #13150f; color: #e8e6df; font-family: 'Outfit', sans-serif; }
+    .fade-in { animation: fade .5s ease; }
+    @keyframes fade { from { opacity: 0; transform: translateY(8px);} to { opacity: 1; transform: none;} }
+    ::-webkit-scrollbar { width: 9px; height: 9px; }
+    ::-webkit-scrollbar-thumb { background: #2e332a; border-radius: 9px; }
+    select, input { color-scheme: dark; }
+    button:hover { filter: brightness(1.12); }
+    tbody tr:hover { background: #1c1f1a !important; }
+    a { color: #bc8a5f; }
+  </style>
+</head>
+<body>
+  <div id="root"></div>
+
+  <!-- =========================================================
+       KONFIGURATION — hier deine Supabase-Werte eintragen
+       (Projekt-URL + "anon"/publishable key aus dem Dashboard:
+        Settings → API)
+       ========================================================= -->
+  <script>
+    window.SUPABASE_URL = "https://alknakszbtxwplzvkauu.supabase.co";   // z.B. https://abcd1234.supabase.co
+    window.SUPABASE_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImFsa25ha3N6YnR4d3BsenZrYXV1Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODA3NDE2NjcsImV4cCI6MjA5NjMxNzY2N30.igjOSnowxc2BCa4DfGGRMduyKrY7P7vlTmVNOGJQBbU";       // anon / publishable key (öffentlich, RLS schützt die Daten)
+  </script>
+
+  <script type="text/babel" data-type="module">
+    const { useState, useEffect, useMemo, useRef, createElement: h } = React;
+
+    // ---------- Supabase Client ----------
+    const sb = (window.SUPABASE_URL && window.SUPABASE_URL !== "DEINE_PROJECT_URL")
+      ? window.supabase.createClient(window.SUPABASE_URL, window.SUPABASE_KEY)
+      : null;
+
+    // ---------- Konstanten ----------
+    const CATEGORIES = ["Wohnen","Lebensmittel","Mobilität","Versicherung","Abo","Gesundheit","Freizeit","Gehalt","Sonstiges"];
+    const INTERVALS = { monthly:{label:"monatlich",perYear:12}, quarterly:{label:"vierteljährlich",perYear:4}, yearly:{label:"jährlich",perYear:1} };
+    const COLORS = ["#d4a373","#7d8c69","#a3b18a","#6b705c","#bc8a5f","#8a817c","#c9ada7","#9a8c98","#4a4e69"];
+
+    const fmt = (n) => new Intl.NumberFormat("de-DE",{style:"currency",currency:"EUR"}).format(Number(n)||0);
+    const today = () => new Date().toISOString().slice(0,10);
+    const daysUntil = (d) => d ? Math.ceil((new Date(d)-new Date())/86400000) : null;
+    const perMonth = (amount, interval) => (Number(amount||0) * (INTERVALS[interval]?.perYear||12)) / 12;
+    const perYear  = (amount, interval) => Number(amount||0) * (INTERVALS[interval]?.perYear||12);
+
+    // Welche DB-Tabellen es gibt + ihre Spalten
+    const TABLES = {
+      transactions: ["name","type","category","amount"],
+      subscriptions:["name","amount","interval","next_due"],
+      insurances:   ["provider","kind","policy","amount","interval","cancel_by"],
+      accounts:     ["name","type","balance"],
+      contracts:    ["name","start_date","term","cancel_by"],
+    };
+
+    // ================= AUTH-GATE =================
+    function Root() {
+      const [session, setSession] = useState(null);
+      const [ready, setReady] = useState(false);
+
+      useEffect(() => {
+        if (!sb) { setReady(true); return; }
+        sb.auth.getSession().then(({data}) => { setSession(data.session); setReady(true); });
+        const { data: sub } = sb.auth.onAuthStateChange((_e, s) => setSession(s));
+        return () => sub.subscription.unsubscribe();
+      }, []);
+
+      if (!sb) return h(SetupNeeded);
+      if (!ready) return h(Splash);
+      if (!session) return h(AuthScreen);
+      return h(App, { session });
+    }
+
+    function Splash() {
+      return h("div",{style:{minHeight:"100vh",display:"grid",placeItems:"center",color:"#7a8068"}},"Lädt …");
+    }
+
+    function SetupNeeded() {
+      return h("div",{style:{minHeight:"100vh",display:"grid",placeItems:"center",padding:30}},
+        h("div",{style:{maxWidth:560,background:"#191c14",border:"1px solid #25291f",borderRadius:16,padding:32}},
+          h("h1",{style:{fontFamily:"'Fraunces',serif",fontSize:26,marginBottom:14}},"Fast fertig"),
+          h("p",{style:{color:"#9aa088",lineHeight:1.6,fontSize:15}},
+            "Trage oben in der Datei deine Supabase-Projekt-URL und den anon-Key ein (Variablen ",
+            h("code",null,"window.SUPABASE_URL"), " und ", h("code",null,"window.SUPABASE_KEY"),
+            "). Die genaue Anleitung steht in der README.")
+        )
+      );
+    }
+
+    // ================= LOGIN / REGISTRIERUNG =================
+    function AuthScreen() {
+      const [mode, setMode] = useState("login");
+      const [email, setEmail] = useState("");
+      const [pw, setPw] = useState("");
+      const [msg, setMsg] = useState("");
+      const [busy, setBusy] = useState(false);
+
+      const submit = async () => {
+        setBusy(true); setMsg("");
+        try {
+          if (mode === "login") {
+            const { error } = await sb.auth.signInWithPassword({ email, password: pw });
+            if (error) throw error;
+          } else {
+            const { error } = await sb.auth.signUp({ email, password: pw });
+            if (error) throw error;
+            setMsg("Prüfe deine E-Mails zur Bestätigung (falls E-Mail-Bestätigung aktiv ist).");
+          }
+        } catch (e) { setMsg(e.message || "Fehler"); }
+        setBusy(false);
+      };
+
+      return h("div",{style:{minHeight:"100vh",display:"grid",placeItems:"center",padding:24}},
+        h("div",{className:"fade-in",style:{width:360,background:"#191c14",border:"1px solid #25291f",borderRadius:18,padding:34}},
+          h("div",{style:{display:"flex",gap:12,alignItems:"center",marginBottom:24}},
+            h("div",{style:ST.brandMark},"₣"),
+            h("div",null,
+              h("div",{style:{fontFamily:"'Fraunces',serif",fontSize:20,fontWeight:600}},"Hausstand"),
+              h("div",{style:{fontSize:11.5,color:"#7a8068",textTransform:"uppercase",letterSpacing:".04em"}},"Finanzen & Verträge"))),
+          h("h2",{style:{fontFamily:"'Fraunces',serif",fontWeight:500,fontSize:18,marginBottom:18}},
+            mode==="login"?"Anmelden":"Konto erstellen"),
+          h("label",{style:ST.label},"E-Mail"),
+          h("input",{style:{...ST.input,width:"100%",marginBottom:12,marginTop:5},type:"email",value:email,
+            onChange:e=>setEmail(e.target.value),placeholder:"du@beispiel.de"}),
+          h("label",{style:ST.label},"Passwort"),
+          h("input",{style:{...ST.input,width:"100%",marginBottom:18,marginTop:5},type:"password",value:pw,
+            onChange:e=>setPw(e.target.value),onKeyDown:e=>e.key==="Enter"&&submit(),placeholder:"••••••••"}),
+          h("button",{style:{...ST.addBtn,width:"100%",height:44},disabled:busy,onClick:submit},
+            busy?"…":(mode==="login"?"Anmelden":"Registrieren")),
+          msg && h("p",{style:{color:"#d4a373",fontSize:13,marginTop:14,lineHeight:1.5}},msg),
+          h("p",{style:{fontSize:13,color:"#8a9072",marginTop:18,textAlign:"center"}},
+            mode==="login"?"Noch kein Konto? ":"Schon registriert? ",
+            h("a",{style:{cursor:"pointer"},onClick:()=>{setMode(mode==="login"?"signup":"login");setMsg("");}},
+              mode==="login"?"Registrieren":"Anmelden"))
+        )
+      );
+    }
+
+    // ================= HAUPT-APP =================
+    function App({ session }) {
+      const [tab, setTab] = useState("dashboard");
+      const [data, setData] = useState({transactions:[],subscriptions:[],insurances:[],accounts:[],contracts:[]});
+      const [loading, setLoading] = useState(true);
+      const fileRef = useRef(null);
+
+      const reload = async () => {
+        setLoading(true);
+        const out = {};
+        for (const t of Object.keys(TABLES)) {
+          const { data: rows, error } = await sb.from(t).select("*").order("created_at",{ascending:true});
+          out[t] = error ? [] : rows;
+        }
+        setData(out); setLoading(false);
+      };
+      useEffect(() => { reload(); }, []);
+
+      const addRow = async (table, row) => {
+        const { error } = await sb.from(table).insert([{ ...row, user_id: session.user.id }]);
+        if (error) return alert(error.message);
+        reload();
+      };
+      const delRow = async (table, id) => {
+        const { error } = await sb.from(table).delete().eq("id", id);
+        if (error) return alert(error.message);
+        reload();
+      };
+
+      // Berechnungen
+      const monthlyFixed = useMemo(()=>
+        data.subscriptions.reduce((s,x)=>s+perMonth(x.amount,x.interval),0) +
+        data.insurances.reduce((s,x)=>s+perMonth(x.amount,x.interval),0), [data]);
+      const netWorth = useMemo(()=>data.accounts.reduce((s,a)=>s+Number(a.balance||0),0),[data]);
+      const monthlyIncome = useMemo(()=>data.transactions.filter(t=>t.type==="income").reduce((s,t)=>s+Number(t.amount||0),0),[data]);
+      const monthlyExpense = useMemo(()=>data.transactions.filter(t=>t.type==="expense").reduce((s,t)=>s+Number(t.amount||0),0)+monthlyFixed,[data,monthlyFixed]);
+
+      const expenseByCategory = useMemo(()=>{
+        const m={};
+        data.transactions.filter(t=>t.type==="expense").forEach(t=>{m[t.category]=(m[t.category]||0)+Number(t.amount||0);});
+        data.subscriptions.forEach(s=>{m["Abo"]=(m["Abo"]||0)+perMonth(s.amount,s.interval);});
+        data.insurances.forEach(s=>{m["Versicherung"]=(m["Versicherung"]||0)+perMonth(s.amount,s.interval);});
+        return Object.entries(m).map(([name,value])=>({name,value:Math.round(value*100)/100}));
+      },[data]);
+
+      const upcoming = useMemo(()=>{
+        const items=[];
+        data.subscriptions.forEach(s=>s.next_due&&items.push({kind:"Abo",label:s.name,date:s.next_due,amount:s.amount}));
+        data.insurances.forEach(s=>s.cancel_by&&items.push({kind:"Kündigungsfrist (Versicherung)",label:s.provider,date:s.cancel_by}));
+        data.contracts.forEach(c=>c.cancel_by&&items.push({kind:"Kündigungsfrist (Vertrag)",label:c.name,date:c.cancel_by}));
+        return items.map(i=>({...i,days:daysUntil(i.date)})).filter(i=>i.days!==null).sort((a,b)=>a.days-b.days);
+      },[data]);
+
+      const exportData = () => {
+        const blob=new Blob([JSON.stringify(data,null,2)],{type:"application/json"});
+        const url=URL.createObjectURL(blob);const a=document.createElement("a");
+        a.href=url;a.download=`finanzen-backup-${today()}.json`;a.click();URL.revokeObjectURL(url);
+      };
+      const importData = async (e) => {
+        const file=e.target.files?.[0]; if(!file) return;
+        const text=await file.text();
+        let parsed; try{parsed=JSON.parse(text);}catch{return alert("Datei unlesbar.");}
+        if(!confirm("Importierte Einträge werden zur Datenbank hinzugefügt. Fortfahren?")) return;
+        for(const t of Object.keys(TABLES)){
+          for(const row of (parsed[t]||[])){
+            const clean={}; TABLES[t].forEach(c=>clean[c]=row[c]);
+            await sb.from(t).insert([{...clean,user_id:session.user.id}]);
+          }
+        }
+        reload(); e.target.value="";
+      };
+
+      const NAV=[
+        {id:"dashboard",label:"Dashboard"},
+        {id:"transactions",label:"Einnahmen & Ausgaben"},
+        {id:"subscriptions",label:"Abos"},
+        {id:"insurances",label:"Versicherungen"},
+        {id:"accounts",label:"Konten & Vermögen"},
+        {id:"contracts",label:"Verträge"},
+      ];
+
+      return h("div",{style:ST.app},
+        h("aside",{style:ST.sidebar},
+          h("div",{style:ST.brand},
+            h("div",{style:ST.brandMark},"₣"),
+            h("div",null,
+              h("div",{style:ST.brandName},"Hausstand"),
+              h("div",{style:ST.brandSub},"Finanzen & Verträge"))),
+          h("nav",{style:ST.nav},
+            NAV.map(n=>h("button",{key:n.id,onClick:()=>setTab(n.id),
+              style:{...ST.navItem,...(tab===n.id?ST.navItemActive:{})}}, n.label))),
+          h("div",{style:{display:"flex",flexDirection:"column",gap:8,borderTop:"1px solid #25291f",paddingTop:16}},
+            h("div",{style:{fontSize:11.5,color:"#6b705c",padding:"0 4px",overflow:"hidden",textOverflow:"ellipsis"}},session.user.email),
+            h("div",{style:{display:"flex",gap:8}},
+              h("button",{style:ST.backupBtn,onClick:exportData},"Backup"),
+              h("button",{style:ST.backupBtn,onClick:()=>fileRef.current?.click()},"Laden")),
+            h("input",{ref:fileRef,type:"file",accept:"application/json",onChange:importData,style:{display:"none"}}),
+            h("button",{style:{...ST.backupBtn,marginTop:2},onClick:()=>sb.auth.signOut()},"Abmelden"))
+        ),
+        h("main",{style:ST.main},
+          loading ? h("div",{style:{color:"#7a8068",padding:40}},"Lädt Daten …") :
+          tab==="dashboard" ? h(Dashboard,{monthlyFixed,netWorth,monthlyIncome,monthlyExpense,expenseByCategory,upcoming}) :
+          tab==="transactions" ? h(Crud,{title:"Einnahmen & Ausgaben",subtitle:"Wiederkehrende monatliche Posten",table:"transactions",items:data.transactions,addRow,delRow,fields:[
+            {key:"name",label:"Bezeichnung",required:true,placeholder:"z. B. Miete"},
+            {key:"type",label:"Art",type:"select",options:[{value:"expense",label:"Ausgabe"},{value:"income",label:"Einnahme"}]},
+            {key:"category",label:"Kategorie",type:"select",options:CATEGORIES},
+            {key:"amount",label:"Betrag / Monat",type:"number",money:true,required:true}]}) :
+          tab==="subscriptions" ? h(Crud,{title:"Abos & wiederkehrende Zahlungen",subtitle:"Mit Hochrechnung auf Jahreskosten",table:"subscriptions",items:data.subscriptions,addRow,delRow,fields:[
+            {key:"name",label:"Anbieter / Dienst",required:true,placeholder:"z. B. Netflix"},
+            {key:"amount",label:"Betrag",type:"number",money:true,required:true},
+            {key:"interval",label:"Intervall",type:"select",options:[{value:"monthly",label:"monatlich"},{value:"quarterly",label:"vierteljährlich"},{value:"yearly",label:"jährlich"}]},
+            {key:"next_due",label:"Nächste Fälligkeit",type:"date"}],
+            compute:{label:"Jahreskosten",fn:it=>fmt(perYear(it.amount,it.interval))}}) :
+          tab==="insurances" ? h(Crud,{title:"Versicherungen",subtitle:"Policen, Beiträge & Kündigungsfristen",table:"insurances",items:data.insurances,addRow,delRow,fields:[
+            {key:"provider",label:"Anbieter",required:true,placeholder:"z. B. Allianz"},
+            {key:"kind",label:"Art",placeholder:"z. B. Haftpflicht"},
+            {key:"policy",label:"Police-Nr."},
+            {key:"amount",label:"Beitrag",type:"number",money:true,required:true},
+            {key:"interval",label:"Intervall",type:"select",options:[{value:"monthly",label:"monatlich"},{value:"quarterly",label:"vierteljährlich"},{value:"yearly",label:"jährlich"}]},
+            {key:"cancel_by",label:"Kündigung bis",type:"date"}],
+            compute:{label:"Jahresbeitrag",fn:it=>fmt(perYear(it.amount,it.interval))}}) :
+          tab==="accounts" ? h(Crud,{title:"Konten & Vermögen",subtitle:"Kontostände und Anlagen manuell pflegen",table:"accounts",items:data.accounts,addRow,delRow,
+            banner:{label:"Gesamtvermögen",value:fmt(netWorth)},fields:[
+            {key:"name",label:"Konto / Anlage",required:true,placeholder:"z. B. Girokonto"},
+            {key:"type",label:"Typ",type:"select",options:["Giro","Tagesgeld","Sparbuch","Depot","Bargeld","Sonstiges"]},
+            {key:"balance",label:"Stand",type:"number",money:true,required:true}]}) :
+          tab==="contracts" ? h(Crud,{title:"Verträge & Kündigungsfristen",subtitle:"Laufzeiten und Stichtage im Blick",table:"contracts",items:data.contracts,addRow,delRow,fields:[
+            {key:"name",label:"Vertrag",required:true,placeholder:"z. B. Fitnessstudio"},
+            {key:"start_date",label:"Beginn",type:"date"},
+            {key:"term",label:"Laufzeit",placeholder:"z. B. 24 Monate"},
+            {key:"cancel_by",label:"Kündigung bis",type:"date"}],
+            compute:{label:"Status",fn:it=>{const d=daysUntil(it.cancel_by);return d===null?"—":d<0?"abgelaufen":`${d} Tage`;}}}) : null
+        )
+      );
+    }
+
+    // ================= DASHBOARD =================
+    function Dashboard({monthlyFixed,netWorth,monthlyIncome,monthlyExpense,expenseByCategory,upcoming}) {
+      const balance = monthlyIncome - monthlyExpense;
+      const total = expenseByCategory.reduce((s,e)=>s+e.value,0) || 1;
+      // einfacher Donut via konischem Gradient
+      let acc=0; const stops=expenseByCategory.map((e,i)=>{
+        const start=acc/total*360; acc+=e.value; const end=acc/total*360;
+        return `${COLORS[i%COLORS.length]} ${start}deg ${end}deg`;
+      }).join(",");
+
+      return h("div",{className:"fade-in"},
+        h(Head,{title:"Dashboard",subtitle:"Dein finanzieller Überblick auf einen Blick"}),
+        h("div",{style:ST.statGrid},
+          h(Stat,{label:"Monatliche Fixkosten",value:fmt(monthlyFixed),accent:"#bc8a5f"}),
+          h(Stat,{label:"Gesamtvermögen",value:fmt(netWorth),accent:"#7d8c69"}),
+          h(Stat,{label:"Einnahmen / Monat",value:fmt(monthlyIncome),accent:"#a3b18a"}),
+          h(Stat,{label:"Saldo / Monat",value:fmt(balance),accent:balance>=0?"#a3b18a":"#bc6b5f"})),
+        h("div",{style:ST.twoCol},
+          h(Card,{title:"Ausgaben nach Kategorie (monatlich)"},
+            expenseByCategory.length===0 ? h(Empty,{text:"Noch keine Ausgaben erfasst."}) :
+            h("div",null,
+              h("div",{style:{display:"flex",justifyContent:"center",padding:"10px 0"}},
+                h("div",{style:{width:180,height:180,borderRadius:"50%",
+                  background:`conic-gradient(${stops})`,
+                  WebkitMask:"radial-gradient(circle, transparent 54px, #000 55px)",
+                  mask:"radial-gradient(circle, transparent 54px, #000 55px)"}})),
+              h("div",{style:ST.legend},
+                expenseByCategory.map((e,i)=>h("div",{key:e.name,style:ST.legendItem},
+                  h("span",{style:{...ST.dot,background:COLORS[i%COLORS.length]}}),
+                  `${e.name} · ${fmt(e.value)}`))))),
+          h(Card,{title:"Anstehende Fristen & Zahlungen"},
+            upcoming.length===0 ? h(Empty,{text:"Keine anstehenden Fristen."}) :
+            h("div",{style:ST.timeline},
+              upcoming.slice(0,8).map((u,i)=>{
+                const urgent=u.days<=30;
+                return h("div",{key:i,style:ST.timeRow},
+                  h("div",{style:{...ST.timeBadge,background:urgent?"#3a2a23":"#2a2e24",color:urgent?"#e0a878":"#a3b18a"}},
+                    u.days<0?`${Math.abs(u.days)} T überf.`:`${u.days} Tage`),
+                  h("div",{style:{flex:1}},
+                    h("div",{style:ST.timeLabel},u.label),
+                    h("div",{style:ST.timeKind},u.kind+(u.amount?` · ${fmt(u.amount)}`:""))),
+                  h("div",{style:ST.timeDate},u.date));
+              })))
+        )
+      );
+    }
+
+    // ================= GENERISCHES CRUD =================
+    function Crud({title,subtitle,table,items,addRow,delRow,fields,compute,banner}) {
+      const init=()=>{const d={};fields.forEach(f=>d[f.key]=f.type==="select"?(f.options[0].value??f.options[0]):f.type==="date"?today():"");return d;};
+      const [draft,setDraft]=useState(init);
+      const submit=()=>{
+        for(const f of fields){ if(f.required && !draft[f.key]) return; }
+        addRow(table,draft); setDraft(init());
+      };
+      const cell=(f,v)=>{
+        if(f.money) return fmt(v);
+        if(f.key==="interval") return INTERVALS[v]?.label||v;
+        if(f.type==="select"&&f.options[0]?.value!==undefined){const o=f.options.find(x=>x.value===v);return o?.label||v;}
+        return (v===""||v==null)?"—":v;
+      };
+      return h("div",{className:"fade-in"},
+        h(Head,{title,subtitle}),
+        banner && h("div",{style:ST.statGrid}, h(Stat,{label:banner.label,value:banner.value,accent:"#7d8c69",wide:true})),
+        h(Card,{title:"Neuer Eintrag"},
+          h("div",{style:ST.formGrid},
+            fields.map(f=>h("div",{key:f.key,style:{display:"flex",flexDirection:"column",gap:5}},
+              h("label",{style:ST.label},f.label),
+              f.type==="select"
+                ? h("select",{style:ST.input,value:draft[f.key],onChange:e=>setDraft({...draft,[f.key]:e.target.value})},
+                    f.options.map(o=>h("option",{key:o.value??o,value:o.value??o},o.label??o)))
+                : h("input",{style:ST.input,type:f.type||"text",placeholder:f.placeholder||"",value:draft[f.key],
+                    onChange:e=>setDraft({...draft,[f.key]:e.target.value})}))),
+            h("button",{style:ST.addBtn,onClick:submit},"+ Hinzufügen"))),
+        h(Card,{title:`Einträge (${items.length})`},
+          items.length===0 ? h(Empty,{text:"Noch keine Einträge."}) :
+          h("div",{style:{overflowX:"auto"}},
+            h("table",{style:ST.table},
+              h("thead",null,h("tr",null,
+                fields.map(f=>h("th",{key:f.key,style:ST.th},f.label)),
+                compute&&h("th",{style:ST.th},compute.label),
+                h("th",{style:ST.th}))),
+              h("tbody",null,
+                items.map(it=>h("tr",{key:it.id,style:ST.tr},
+                  fields.map(f=>h("td",{key:f.key,style:ST.td},cell(f,it[f.key]))),
+                  compute&&h("td",{style:{...ST.td,fontWeight:600}},compute.fn(it)),
+                  h("td",{style:ST.td},
+                    h("button",{style:ST.delBtn,onClick:()=>delRow(table,it.id)},"✕")))))))
+        )
+      );
+    }
+
+    // ================= UI-BAUSTEINE =================
+    const Head=({title,subtitle})=>h("div",{style:{marginBottom:28}},
+      h("h1",{style:ST.h1},title),subtitle&&h("p",{style:ST.subtitle},subtitle));
+    const Stat=({label,value,accent,wide})=>h("div",{style:{...ST.stat,...(wide?{gridColumn:"span 2"}:{})}},
+      h("div",{style:{...ST.statIcon,background:accent+"22",color:accent}},"€"),
+      h("div",null,h("div",{style:ST.statLabel},label),h("div",{style:ST.statValue},value)));
+    const Card=({title,children})=>h("section",{style:ST.card},
+      title&&h("h2",{style:ST.cardTitle},title),children);
+    const Empty=({text})=>h("div",{style:ST.empty},text);
+
+    // ================= STYLES =================
+    const ST={
+      app:{display:"flex",minHeight:"100vh"},
+      sidebar:{width:248,background:"#181a13",borderRight:"1px solid #25291f",padding:"26px 18px",display:"flex",flexDirection:"column",flexShrink:0,position:"sticky",top:0,height:"100vh"},
+      brand:{display:"flex",gap:12,alignItems:"center",marginBottom:34,padding:"0 6px"},
+      brandMark:{width:42,height:42,borderRadius:12,background:"linear-gradient(135deg,#bc8a5f,#7d8c69)",display:"grid",placeItems:"center",fontSize:24,fontFamily:"'Fraunces',serif",color:"#13150f",fontWeight:600},
+      brandName:{fontFamily:"'Fraunces',serif",fontSize:19,fontWeight:600,letterSpacing:"-0.01em"},
+      brandSub:{fontSize:11.5,color:"#7a8068",letterSpacing:"0.04em",textTransform:"uppercase"},
+      nav:{display:"flex",flexDirection:"column",gap:3,flex:1},
+      navItem:{display:"flex",alignItems:"center",gap:12,padding:"11px 13px",background:"transparent",border:"none",color:"#9aa088",cursor:"pointer",borderRadius:10,fontSize:14,textAlign:"left",fontFamily:"inherit",transition:"all .15s"},
+      navItemActive:{background:"#252a1d",color:"#e8e6df",fontWeight:500},
+      backupBtn:{flex:1,padding:"9px 8px",background:"#1f2318",border:"1px solid #2e332a",color:"#aeb497",borderRadius:9,cursor:"pointer",fontSize:12.5,fontFamily:"inherit"},
+      main:{flex:1,padding:"36px 44px",maxWidth:1180,margin:"0 auto",width:"100%"},
+      h1:{fontFamily:"'Fraunces',serif",fontSize:34,fontWeight:500,letterSpacing:"-0.02em"},
+      subtitle:{color:"#8a9072",marginTop:6,fontSize:14.5},
+      statGrid:{display:"grid",gridTemplateColumns:"repeat(auto-fit, minmax(220px,1fr))",gap:16,marginBottom:24},
+      stat:{display:"flex",gap:15,alignItems:"center",background:"#191c14",border:"1px solid #25291f",borderRadius:16,padding:"20px 22px"},
+      statIcon:{width:46,height:46,borderRadius:12,display:"grid",placeItems:"center",flexShrink:0,fontSize:20},
+      statLabel:{fontSize:12.5,color:"#8a9072"},
+      statValue:{fontFamily:"'Spline Sans Mono',monospace",fontSize:22,fontWeight:500,marginTop:3},
+      twoCol:{display:"grid",gridTemplateColumns:"1fr 1fr",gap:16},
+      card:{background:"#191c14",border:"1px solid #25291f",borderRadius:16,padding:24,marginBottom:16},
+      cardTitle:{fontFamily:"'Fraunces',serif",fontSize:17,fontWeight:500,marginBottom:18,color:"#d8d6cb"},
+      formGrid:{display:"grid",gridTemplateColumns:"repeat(auto-fit, minmax(150px,1fr))",gap:14,alignItems:"end"},
+      label:{fontSize:12,color:"#8a9072"},
+      input:{background:"#13150f",border:"1px solid #2e332a",borderRadius:9,padding:"10px 12px",color:"#e8e6df",fontSize:14,fontFamily:"inherit",outline:"none"},
+      addBtn:{padding:"11px 16px",background:"linear-gradient(135deg,#bc8a5f,#a87a52)",border:"none",color:"#13150f",borderRadius:9,cursor:"pointer",fontSize:14,fontWeight:600,fontFamily:"inherit",height:42},
+      table:{width:"100%",borderCollapse:"collapse",fontSize:14},
+      th:{textAlign:"left",padding:"10px 14px",color:"#7a8068",fontSize:11.5,textTransform:"uppercase",letterSpacing:"0.05em",borderBottom:"1px solid #25291f",fontWeight:500},
+      tr:{transition:"background .15s"},
+      td:{padding:"13px 14px",borderBottom:"1px solid #1f2318",color:"#d4d2c7"},
+      delBtn:{background:"transparent",border:"none",color:"#9a6b5f",cursor:"pointer",padding:6,borderRadius:7,fontSize:14},
+      empty:{color:"#6b705c",fontSize:14,padding:"20px 0",textAlign:"center",fontStyle:"italic"},
+      legend:{display:"flex",flexWrap:"wrap",gap:"8px 16px",marginTop:14,fontSize:12.5,color:"#9aa088"},
+      legendItem:{display:"flex",alignItems:"center",gap:7},
+      dot:{width:10,height:10,borderRadius:3,display:"inline-block"},
+      timeline:{display:"flex",flexDirection:"column",gap:10},
+      timeRow:{display:"flex",alignItems:"center",gap:14,padding:"10px 0",borderBottom:"1px solid #1f2318"},
+      timeBadge:{display:"flex",alignItems:"center",gap:5,padding:"5px 10px",borderRadius:8,fontSize:12,fontWeight:500,whiteSpace:"nowrap",minWidth:78,justifyContent:"center"},
+      timeLabel:{fontSize:14,color:"#e8e6df"},
+      timeKind:{fontSize:12,color:"#7a8068",marginTop:2},
+      timeDate:{fontFamily:"'Spline Sans Mono',monospace",fontSize:12.5,color:"#9aa088"},
+    };
+
+    ReactDOM.createRoot(document.getElementById("root")).render(h(Root));
+  </script>
+</body>
+</html>
